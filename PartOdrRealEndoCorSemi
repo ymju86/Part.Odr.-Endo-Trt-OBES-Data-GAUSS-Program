@@ -1,0 +1,263 @@
+/* Control Function Approach for Partly Ordered Treatment: Military Rank Premium */
+
+/* Format setting and data reading */
+new; format/m1/rd 7,3; eps=0.00001; /* a very small number */
+iterlim=100; /* iteration limit */ step=0.5; /* iteration step size */ 
+n=3172; one=ones(n,1); load dat[n,21]=D:\CoWorkers\YoungMin\ObesR3\military.csv;
+
+/* Variables */
+// lwage: 1974 ln(wage), edu: 1974 schooling years, lpinc: 1957 parent wage
+// nact: 1957 # activities, iq: 1957 IQ, dad: 1957 father alive, mom: mother alive
+// rel: 1957 any religion, friend: 1957 friend military, single: 1974 single
+// mar: 1974 married, military: 1974 in the military
+// private ~ officer : ranks
+
+lwage=dat[.,1]; edu=dat[.,2]; lpinc=dat[.,3]; nact=dat[.,4]; iq=dat[.,5]; 
+dad=dat[.,6]; mom=dat[.,7]; rel=dat[.,8]; friend=dat[.,9]; single=dat[.,10]; 
+mar=dat[.,11]; military=dat[.,12]; 
+private=dat[.,14]; corporal=dat[.,15]; sergeant=dat[.,16]; officer=dat[.,17]; 
+// More data in columns 13, 18~21, but not used
+
+/* Model setting */
+// y: ln(wage)
+// d0: control treatment (never joining the military)
+// d1: ordered treatments (observed only when d0=0)
+// del1: private, del2: corporal, del3: sergeant, del4: officer
+y=lwage; d0=1-military; iq=iq/100;
+del1=(1-d0).*private;  del2=(1-d0).*corporal; 
+del3=(1-d0).*sergeant; del4=(1-d0).*officer; 
+d1=del1+2*del2+3*del3+4*del4; 
+
+/* regressors */
+w0=one~edu~lpinc~nact~iq~dad~mom~rel~friend; 
+w1=one~edu~lpinc~nact~iq~dad~mom; // denote w_r -> w1
+x=one~edu~lpinc~nact~iq~dad~mom~single~mar;
+
+/* m is interacted with del#; m=one for no interaction */
+m=one; mdel1=m.*del1; mdel2=m.*del2; mdel3=m.*del3; mdel4=m.*del4; 
+
+/* the number of regressors */
+kw0=cols(w0); kw1=cols(w1); kx=cols(x); km=cols(m); 
+
+/* procedure for t-value */
+proc tv(a,cov); retp(a./sqrt(diag(cov))); endp; 
+
+/* procedure for ols */
+proc (5) = ols(x,y); local n,k,invx,est,res,res2,s,rsq,cov; 
+  n=rows(x); k=cols(x); invx=invpd(x'x); est=invx*(x'y); 
+  res=y-x*est; res2=res^2; s=sqrt(sumc(res2)/(n-k)); 
+  rsq=1-sumc(res2)/sumc((y-meanc(y))^2); cov=invx*(x'(x.*res2))*invx; 
+retp(est,cov,s,rsq,res); endp;
+
+
+/*------------------------------- LSE for Y ------------------------------*/
+
+q=x~mdel1~mdel2~mdel3~mdel4; 
+{lse1,covlse1,s1,rsq1,res1}=ols(q,y); tvlse1=tv(lse1,covlse1); 
+
+/* Print LSE-Ranks in Table 2 */
+let list[13,1] = one edu lpinc nact iq dad mom single mar priv corp serg offi;
+let mask[1,3] = 0 1 1;           
+let fmt[3,3] = "-*.*s" 8 8  "*.*lf" 7 3  "*.*lf" 7 2;
+?; printfm(list~lse1~tvlse1,mask,fmt); "rsq1~s1: " rsq1~s1;
+
+
+/*----------------------------- CF Approacch -----------------------------*/
+
+/* Probit to get alpha_0 initial value */
+
+proc likepro(a); local p; p=cdfn(w0*a); retp(d0.*ln(p)+(1-d0).*ln(1-p)); endp;
+
+a0=invpd(w0'w0)*(w0'd0); bestlike=sumc(likepro(a0)); besta=a0; niter=1; 
+JOBPRO:
+gradi=gradp(&likepro,a0); a1=a0+step*invpd(gradi'gradi)*sumc(gradi); // step=0.5
+newlike=sumc(likepro(a1)); 
+if abs(newlike-bestlike)<eps; goto DONEPRO; endif;
+if newlike>bestlike; bestlike=newlike; besta=a1; endif;
+if niter>iterlim; goto DONEPRO; endif; // iterlim=100
+a0=a1; niter=niter+1; goto JOBPRO;
+DONEPRO: 
+pro=besta; wa0=w0*pro;  
+
+
+/* Ordered probit for alpha_1 */
+
+proc likeopr(g); local a,w1a,tau,tau2,tau3,p1,p2,p3,p4;
+  a=g[1:kw1,1]; w1a=w1*a; tau=abs(g[kw1+1:kw1+2,1]); tau=sortc(tau,1);
+  tau2=tau[1,1]; tau3=tau[2,1]; p1=cdfn(-w1a); p2=cdfn(tau2-w1a)-cdfn(-w1a); 
+  p3=cdfn(tau3-w1a)-cdfn(tau2-w1a); p4=1-cdfn(tau3-w1a);
+retp( del1.*ln(p1)+del2.*ln(p2)+del3.*ln(p3)+del4.*ln(p4) ); endp;
+
+g0=zeros(kw1,1)|1|2; bestlike=sumc(likeopr(g0)); bestg=g0; niter=1; 
+JOBOPR:
+gradi=gradp(&likeopr,g0); g1=g0+step*invpd(gradi'gradi)*sumc(gradi); // step=0.5
+newlike=sumc(likeopr(g1)); 
+if abs(newlike-bestlike)<eps; goto DONEOPR; endif;
+if newlike>bestlike; bestlike=newlike; bestg=g1; endif;
+if niter>iterlim; goto DONEOPR; endif; // iterlim=100
+g0=g1; niter=niter+1; goto JOBOPR;
+DONEOPR:
+opr=bestg; a1=opr[1:kw1,1]; wa1=w1*a1; tau2=opr[kw1+1,1]; tau3=opr[kw1+2,1]; 
+
+
+/* MLE for (d0,d1) */
+
+proc likemle(g); local a0,a1,tau,t2,t3,rho,wa0,wa1,p0,p1,p2,p3,p4;
+  a0=g[1:kw0,1]; a1=g[kw0+1:kw0+kw1,1]; tau=abs(g[kw0+kw1+1:kw0+kw1+2,1]); 
+  tau=sortc(tau,1); t2=tau[1,1]; t3=tau[2,1]; 
+  rho=g[rows(g),1]; rho=rho*(abs(rho).<0.95); wa0=w0*a0; wa1=w1*a1; 
+  // Appendix 1
+  p0=cdfn(wa0); 
+  p1=cdfbvn(-wa0,-wa1,rho); 
+  p2=cdfbvn(-wa0,-wa1+t2,rho)-p1; 
+  p3=cdfbvn(-wa0,-wa1+t3,rho)-p2-p1; p4=1-p0-p1-p2-p3;
+  p1=p1.*(p1.>eps)+eps*(p1.<eps); p2=p2.*(p2.>eps)+eps*(p2.<eps);
+  p3=p3.*(p3.>eps)+eps*(p3.<eps); p4=p4.*(p4.>eps)+eps*(p4.<eps);
+retp(d0.*ln(p0)+del1.*ln(p1)+del2.*ln(p2)+del3.*ln(p3)+del4.*ln(p4)); endp;
+
+g0=pro|opr|0; bestlike=sumc(likemle(g0)); bestg=g0; niter=1;
+JOBMLE:
+gradi=gradp(&likemle,g0); g1=g0+step*invpd(gradi'gradi)*sumc(gradi); // step=0.5
+newlike=sumc(likemle(g1)); 
+if abs(newlike-bestlike)<eps; goto DONEMLE; endif;
+if newlike>bestlike; bestlike=newlike; bestg=g1; endif;
+if niter>iterlim; goto DONEMLE; endif; // iterlim=100
+g0=g1; niter=niter+1; goto JOBMLE;
+DONEMLE:
+mle=bestg; gradi=gradp(&likemle,mle); covmle=invpd(gradi'gradi); 
+tvmle=tv(mle,covmle); infmle=gradi*covmle;
+
+a0=mle[1:kw0,1]; tva0=tvmle[1:kw0,1]; wa0=w0*a0; 
+a1=mle[kw0+1:kw0+kw1]; tva1=tvmle[kw0+1:kw0+kw1]; wa1=w1*a1;
+t2=mle[kw0+kw1+1,1]; t3=mle[kw0+kw1+2,1]; rho=mle[rows(mle),1];
+/* mle~tvmle; "MLE log-likelihood " bestlike; stop; */
+
+
+/* CF Approach */
+// c: CF(control function), lamda in the paper
+p0=cdfn(wa0); c0=pdfn(wa0)./cdfn(wa0); 
+p1=cdfbvn(-wa0,-wa1,rho); p2=cdfbvn(-wa0,-wa1+t2,rho)-p1; 
+p3=cdfbvn(-wa0,-wa1+t3,rho)-p2-p1; p4=1-p0-p1-p2-p3; 
+rho2=rho^2; lo=-10*one'; /* lower bound for -infinity */ hi=-lo;
+
+proc psi0(t0,t1);
+retp(t0.*exp( -(t0^2-2*rho*t0.*t1+t1^2)/(2*(1-rho2)) )/(2*pi*sqrt(1-rho2)));
+endp;
+proc psi1(t0,t1);
+retp(t1.*exp( -(t0^2-2*rho*t0.*t1+t1^2)/(2*(1-rho2)) )/(2*pi*sqrt(1-rho2)));
+endp;
+// In page 4, lamda_jd = cjd
+// intquad2: Integrates a specified function
+c01=intquad2(&psi0,(-wa0')|lo,(-wa1')|lo)./p1;
+c11=intquad2(&psi1,(-wa0')|lo,(-wa1')|lo)./p1;
+c02=intquad2(&psi0,(-wa0')|lo,(-wa1'+t2)|(-wa1'))./p2;
+c12=intquad2(&psi1,(-wa0')|lo,(-wa1'+t2)|(-wa1'))./p2;
+c03=intquad2(&psi0,(-wa0')|lo,(-wa1'+t3)|(-wa1'+t2))./p3;
+c13=intquad2(&psi1,(-wa0')|lo,(-wa1'+t3)|(-wa1'+t2))./p3;
+c04=intquad2(&psi0,(-wa0')|lo,hi|(-wa1'+t3))./p4;
+c14=intquad2(&psi1,(-wa0')|lo,hi|(-wa1'+t3))./p4;
+
+lam0=del1.*c01+del2.*c02+del3.*c03+del4.*c04;  
+lam1=del1.*c11+del2.*c12+del3.*c13+del4.*c14;  
+
+q6=x~mdel1~mdel2~mdel3~mdel4~(d0.*c0)~lam0~lam1;
+{lse6,covlse6,s6,rsq6,res6}=ols(q6,y); tvlse6=tv(lse6,covlse6);
+inf6=(q6.*res6)*invpd(q6'q6); 
+
+proc scorelse0(a); local a0,wa0,a1,wa1,t2,t3,rho,p0,p1,p2,p3,p4;
+  local c01,c02,c03,c04,c11,c12,c13,c14,lam0,lam1,q6,u6,infu;
+  a0=a[1:kw0,1]; wa0=w0*a0; a1=a[kw0+1:kw0+kw1,1]; wa1=w1*a1;
+  t2=a[kw0+kw1+1,1]; t3=a[kw0+kw1+2,1]; rho=a[rows(a),1];
+  p0=cdfn(wa0); p1=cdfbvn(-wa0,-wa1,rho); 
+  p2=cdfbvn(-wa0,-wa1+t2,rho)-p1; 
+  p3=cdfbvn(-wa0,-wa1+t3,rho)-p2-p1; p4=1-p0-p1-p2-p3;
+
+  c01=intquad2(&psi0,(-wa0')|lo,(-wa1')|lo)./p1;
+  c11=intquad2(&psi1,(-wa0')|lo,(-wa1')|lo)./p1;
+  c02=intquad2(&psi0,(-wa0')|lo,(-wa1'+t2)|(-wa1'))./p2;
+  c12=intquad2(&psi1,(-wa0')|lo,(-wa1'+t2)|(-wa1'))./p2;
+  c03=intquad2(&psi0,(-wa0')|lo,(-wa1'+t3)|(-wa1'+t2))./p3;
+  c13=intquad2(&psi1,(-wa0')|lo,(-wa1'+t3)|(-wa1'+t2))./p3;
+  c04=intquad2(&psi0,(-wa0')|lo,hi|(-wa1'+t3))./p4;
+  c14=intquad2(&psi1,(-wa0')|lo,hi|(-wa1'+t3))./p4;
+
+  lam0=del1.*c01+del2.*c02+del3.*c03+del4.*c04;  
+  lam1=del1.*c11+del2.*c12+del3.*c13+del4.*c14;  
+  q6=x~mdel1~mdel2~mdel3~mdel4~(d0.*c0)~lam0~lam1;
+  u6=y-q6*(invpd(q6'q6)*q6'y); infu=(q6.*u6)*invpd(q6'q6);
+ retp(sumc(infu)); endp; 
+
+firmle0=gradp(&scorelse0,mle); 
+inflse6=inf6+infmle*firmle0'; //infmle comes from MLE for (d0,d1)
+covlse6m=inflse6'inflse6; tvlse6m=tv(lse6,covlse6m);
+
+/* Print Beta-Normal in Table 3 */
+let list[16,1] = one edu lpinc nact iq dad mom single mar 
+                 priv corp serg offi sig theta0 theta1;
+let mask[1,4] = 0 1 1 1;           
+let fmt[4,3] = "-*.*s" 9 9  "*.*lf" 7 3  "*.*lf" 7 2  "*.*lf" 7 2;
+?; printfm(list~lse6~tvlse6~tvlse6m,mask,fmt); "rsq6~s6: " rsq6~s6;
+
+capr=eye(cols(q6)); capr=capr[.,14:16]; 
+wald=(capr'lse6)'invpd(capr'*covlse6m*capr)*(capr'lse6); 
+?; "no endogeneity test p-value;"; cdfchic(wald,3);
+
+
+/* Double Index CF Approach */
+
+del=del1~del2~del3~del4; wa02=wa0^2; wa01=wa0.*wa1;
+q7=x~mdel1~mdel2~mdel3~mdel4~wa0~wa02~(del.*wa0)~(del.*wa02)~(del.*wa01); //(2.8)
+
+{lse7,covlse7,s7,rsq7,res7}=ols(q7,y); tvlse7=tv(lse7,covlse7);
+u7=res7; inf7=(q7.*u7)*invpd(q7'q7); 
+
+proc scorelse1(a); local a0,wa0,wa02,a1,wa1,wa01,t2,t3,rho,p0,p1,p2,p3,p4;
+  local c01,c02,c03,c04,c11,c12,c13,c14,lam0,lam1,q7,u7,infu;
+  a0=a[1:kw0,1]; wa0=w0*a0; wa02=wa0^2; 
+  a1=a[kw0+1:kw0+kw1,1]; wa1=w1*a1; wa01=wa0.*wa1;
+  t2=a[kw0+kw1+1,1]; t3=a[kw0+kw1+2,1]; rho=a[rows(a),1];
+  p0=cdfn(wa0); p1=cdfbvn(-wa0,-wa1,rho); 
+  p2=cdfbvn(-wa0,-wa1+t2,rho)-p1; 
+  p3=cdfbvn(-wa0,-wa1+t3,rho)-p2-p1; p4=1-p0-p1-p2-p3;
+ 
+  c01=intquad2(&psi0,(-wa0')|lo,(-wa1')|lo)./p1;
+  c11=intquad2(&psi1,(-wa0')|lo,(-wa1')|lo)./p1;
+  c02=intquad2(&psi0,(-wa0')|lo,(-wa1'+t2)|(-wa1'))./p2;
+  c12=intquad2(&psi1,(-wa0')|lo,(-wa1'+t2)|(-wa1'))./p2;
+  c03=intquad2(&psi0,(-wa0')|lo,(-wa1'+t3)|(-wa1'+t2))./p3;
+  c13=intquad2(&psi1,(-wa0')|lo,(-wa1'+t3)|(-wa1'+t2))./p3;
+  c04=intquad2(&psi0,(-wa0')|lo,hi|(-wa1'+t3))./p4;
+  c14=intquad2(&psi1,(-wa0')|lo,hi|(-wa1'+t3))./p4;
+
+  lam0=del1.*c01+del2.*c02+del3.*c03+del4.*c04;  
+  lam1=del1.*c11+del2.*c12+del3.*c13+del4.*c14; 
+  q7=x~mdel1~mdel2~mdel3~mdel4~wa0~wa02~(del.*wa0)~(del.*wa02)~(del.*wa01); 
+  u7=y-q7*(invpd(q7'q7)*q7'y); infu=(q7.*u7)*invpd(q7'q7);
+ retp(sumc(infu)); endp; 
+
+firmle1=gradp(&scorelse1,mle); 
+inflse7=inf7+infmle*firmle1'; //infmle comes from MLE for (d0,d1)
+covlse7m=inflse7'inflse7; tvlse7m=tv(lse7,covlse7m); 
+
+/* a0: alpha_0 for Civilian, a1a: alpha_r for Rank in Table 3 */
+a0=mle[1:kw0,1]; tva0=tvmle[1:kw0,1]; a0=a0|0|0|0; tva0=tva0|0|0|0;
+a1a=mle[kw0+1:rows(mle),1]; tva1a=tvmle[kw0+1:rows(tvmle),1]; 
+a1a=    a1a[1:kw0-2,1]|0|0|  a1a[kw0-1:rows(a1a),1]; 
+tva1a=tva1a[1:kw0-2,1]|0|0|tva1a[kw0-1:rows(tva1a),1];
+
+/* Print alpha_0, alpha_r in Table 3 */
+let list[12,1] = one edu lpinc nact iq dad mom rel friend t2 t3 rho;
+let mask[1,5] = 0 1 1 1 1;           
+let fmt[5,3] = "-*.*s" 8 8  "*.*lf" 7 3  "*.*lf" 7 2
+               "*.*lf" 7 3  "*.*lf" 7 2;
+?; printfm(list~a0~tva0~a1a~tva1a,mask,fmt);
+
+/* Print Beta-Index in Table 3 and Correction terms in Table 4 */
+let list[27,1] = one edu lpinc nact iq dad mom single mar 
+                 priv corp serg offi wa0 wa02 d1wa0 d2wa0 d3wa0 d4wa0
+              d1wa02 d2wa02 d3wa02 d4wa02 d1wa01 d2wa01 d3wa01 d4wa01;
+let mask[1,4] = 0 1 1 1;           
+let fmt[4,3] = "-*.*s" 9 9  "*.*lf" 7 3  "*.*lf" 7 2  "*.*lf" 7 2;
+?; printfm(list~lse7~tvlse7~tvlse7m,mask,fmt); "rsq7~s7: " rsq7~s7;
+
+end;
